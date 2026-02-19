@@ -93,14 +93,6 @@
             margin-bottom: 1rem;
         }
 
-        .color-picker {
-            width: 100%;
-            height: 50px;
-            border: 2px solid #78350f;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
         .btn {
             width: 100%;
             padding: 0.875rem;
@@ -247,10 +239,7 @@
             display: block;
         }
 
-        .slider-group {
-            margin-bottom: 0.75rem;
-        }
-
+        .slider-group { margin-bottom: 0.75rem; }
         .slider-group:last-child { margin-bottom: 0; }
 
         .slider-group label {
@@ -435,7 +424,8 @@
 
                     <div class="control-section">
                         <h3>save</h3>
-                        <button class="btn btn-secondary" onclick="saveArt()">download artwork</button>
+                        <button class="btn btn-secondary" onclick="saveArt('transparent')">transparent</button>
+                        <button class="btn btn-secondary" onclick="saveArt('bg')">with background</button>
                     </div>
 
                 </div>
@@ -456,7 +446,8 @@
     </footer>
 
     <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
-        let pg;           // persistent graphics layer
+        let pg;            // white-bg layer for display
+        let pgT;           // transparent layer for export
         let segments = 8;
         let brushSize = 12;
         let brushAlpha = 230;
@@ -471,15 +462,16 @@
 
         function setup() {
             const cw = document.querySelector('.canvas-container').clientWidth;
-            canvasSize = Math.min(cw - 150, 720);
-            // Make it square and even
-            canvasSize = Math.floor(canvasSize / 2) * 2;
+            canvasSize = Math.floor(Math.min(cw - 150, 720) / 2) * 2;
 
             let cnv = createCanvas(canvasSize, canvasSize);
             cnv.parent('canvasContainer');
 
             pg = createGraphics(canvasSize, canvasSize);
             pg.background(255);
+
+            pgT = createGraphics(canvasSize, canvasSize);
+            // pgT intentionally has no background — stays transparent
 
             brushCol = color('#2563eb');
 
@@ -502,11 +494,10 @@
         }
 
         function draw() {
-            // Composite: white bg + persistent layer
             background(255);
             image(pg, 0, 0);
 
-            // Guide lines (subtle) when not painting
+            // Guide lines when idle
             if (!isDown) {
                 push();
                 translate(width / 2, height / 2);
@@ -523,8 +514,7 @@
         function mousePressed() {
             if (outOfBounds()) return;
             isDown = true;
-            lastMX = mouseX;
-            lastMY = mouseY;
+            lastMX = mouseX; lastMY = mouseY;
             currentStroke = [];
             paintAt(mouseX, mouseY, mouseX, mouseY);
             redraw();
@@ -533,8 +523,7 @@
         function mouseDragged() {
             if (!isDown || outOfBounds()) return;
             paintAt(lastMX, lastMY, mouseX, mouseY);
-            lastMX = mouseX;
-            lastMY = mouseY;
+            lastMX = mouseX; lastMY = mouseY;
             redraw();
         }
 
@@ -543,30 +532,32 @@
             isDown = false;
             if (currentStroke.length > 0) {
                 strokes.push(currentStroke);
-                redoStack = []; // new action clears redo history
+                redoStack = [];
             }
             redraw();
         }
 
-        function mouseMoved() {
-            if (!isDown) redraw(); // keep guide lines live
-        }
+        function mouseMoved() { if (!isDown) redraw(); }
 
         function outOfBounds() {
             return mouseX < 0 || mouseX > width || mouseY < 0 || mouseY > height;
         }
 
         function paintAt(fromX, fromY, toX, toY) {
-            const cmd = { fromX, fromY, toX, toY, segments, brushSize, brushType, alpha: brushAlpha, col: [red(brushCol), green(brushCol), blue(brushCol)] };
+            const cmd = {
+                fromX, fromY, toX, toY,
+                segments, brushSize, brushType,
+                alpha: brushAlpha,
+                col: [red(brushCol), green(brushCol), blue(brushCol)]
+            };
             currentStroke.push(cmd);
             applyCmd(pg, cmd);
+            applyCmd(pgT, cmd);
         }
 
         function applyCmd(g, cmd) {
             const cx = canvasSize / 2;
             const cy = canvasSize / 2;
-
-            // Translate coordinates to be relative to centre
             const fx = cmd.fromX - cx;
             const fy = cmd.fromY - cy;
             const tx = cmd.toX   - cx;
@@ -579,13 +570,9 @@
                 const angle = (TWO_PI / cmd.segments) * i;
                 g.push();
                 g.rotate(angle);
-
                 applyMark(g, fx, fy, tx, ty, cmd);
-
-                // Mirror
                 g.scale(1, -1);
                 applyMark(g, fx, fy, tx, ty, cmd);
-
                 g.pop();
             }
 
@@ -608,12 +595,9 @@
             g.fill(r, gr, b, cmd.alpha);
 
             if (cmd.brushType === 'circle') {
-                // Smooth line between last and current using ellipses
                 const steps = max(1, floor(dist(fx, fy, tx, ty) / 2));
                 for (let s = 0; s <= steps; s++) {
-                    const x = lerp(fx, tx, s / steps);
-                    const y = lerp(fy, ty, s / steps);
-                    g.ellipse(x, y, sz);
+                    g.ellipse(lerp(fx, tx, s / steps), lerp(fy, ty, s / steps), sz);
                 }
             } else if (cmd.brushType === 'square') {
                 const steps = max(1, floor(dist(fx, fy, tx, ty) / 2));
@@ -658,21 +642,134 @@
         }
 
         function clearCanvas() {
-            strokes = [];
-            currentStroke = [];
-            redoStack = [];
+            strokes = []; currentStroke = []; redoStack = [];
             pg.background(255);
+            pgT.clear();
             redraw();
         }
 
         function rebuildCanvas() {
             pg.background(255);
+            pgT.clear();
             for (let stroke of strokes) {
                 for (let cmd of stroke) {
                     applyCmd(pg, cmd);
+                    applyCmd(pgT, cmd);
                 }
             }
             redraw();
+        }
+
+        // ── Save ─────────────────────────────────────────────────────
+
+        function saveArt(mode) {
+            const DPR = 3; // 3x for high quality
+            const EX = canvasSize * DPR; // export canvas size
+
+            const offscreen = document.createElement('canvas');
+            offscreen.width = EX;
+            offscreen.height = EX;
+            const ctx = offscreen.getContext('2d');
+
+            // Scale all drawing ops up by DPR
+            ctx.scale(DPR, DPR);
+
+            if (mode === 'bg') {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvasSize, canvasSize);
+            }
+            // transparent: ctx is clear by default
+
+            // Replay all strokes directly onto the native canvas context
+            for (let stroke of strokes) {
+                for (let cmd of stroke) {
+                    drawCmdToCtx(ctx, cmd);
+                }
+            }
+
+            const filename = mode === 'bg' ? 'kaleido_withbg.png' : 'kaleido.png';
+            offscreen.toBlob(blob => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(url);
+            }, 'image/png');
+        }
+
+        // Replays a single stroke command onto a native 2D canvas context
+        function drawCmdToCtx(ctx, cmd) {
+            const cx = canvasSize / 2;
+            const cy = canvasSize / 2;
+            const fx = cmd.fromX - cx;
+            const fy = cmd.fromY - cy;
+            const tx = cmd.toX   - cx;
+            const ty = cmd.toY   - cy;
+            const [r, g, b] = cmd.col;
+            const sz = cmd.brushSize;
+            const alpha = cmd.alpha / 255;
+
+            ctx.save();
+            ctx.translate(cx, cy);
+
+            for (let i = 0; i < cmd.segments; i++) {
+                const angle = (Math.PI * 2 / cmd.segments) * i;
+
+                // Normal
+                ctx.save();
+                ctx.rotate(angle);
+                applyMarkCtx(ctx, fx, fy, tx, ty, r, g, b, alpha, sz, cmd.brushType);
+                ctx.restore();
+
+                // Mirrored
+                ctx.save();
+                ctx.rotate(angle);
+                ctx.scale(1, -1);
+                applyMarkCtx(ctx, fx, fy, tx, ty, r, g, b, alpha, sz, cmd.brushType);
+                ctx.restore();
+            }
+
+            ctx.restore();
+        }
+
+        function applyMarkCtx(ctx, fx, fy, tx, ty, r, g, b, alpha, sz, brushType) {
+            if (brushType === 'erase') {
+                ctx.save();
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.beginPath();
+                ctx.arc(tx, ty, sz, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+                return;
+            }
+
+            const steps = Math.max(1, Math.floor(Math.hypot(tx - fx, ty - fy) / 2));
+
+            if (brushType === 'circle') {
+                ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+                for (let s = 0; s <= steps; s++) {
+                    const x = fx + (tx - fx) * s / steps;
+                    const y = fy + (ty - fy) * s / steps;
+                    ctx.beginPath();
+                    ctx.arc(x, y, sz / 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else if (brushType === 'square') {
+                ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+                for (let s = 0; s <= steps; s++) {
+                    const x = fx + (tx - fx) * s / steps;
+                    const y = fy + (ty - fy) * s / steps;
+                    ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
+                }
+            } else if (brushType === 'line') {
+                ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+                ctx.lineWidth = sz / 3;
+                ctx.beginPath();
+                ctx.moveTo(fx, fy);
+                ctx.lineTo(tx, ty);
+                ctx.stroke();
+            }
         }
 
         // ── Surprise Me ──────────────────────────────────────────────
@@ -681,14 +778,12 @@
             sparkleBtn(e);
             clearCanvas();
 
-            // Pick random segments
             const segOptions = [4, 6, 8, 10, 12, 16];
             segments = random(segOptions);
             document.querySelectorAll('.seg-btn').forEach(b => {
                 b.classList.toggle('active', parseInt(b.textContent) === segments);
             });
 
-            // Random palette
             const palettes = [
                 ['#2563eb', '#9B87F5', '#06b6d4', '#fde68a'],
                 ['#ef4444', '#f97316', '#fde68a', '#78350f'],
@@ -698,7 +793,6 @@
             ];
             const pal = random(palettes);
 
-            // Paint several random strokes
             const numStrokes = floor(random(12, 30));
             for (let s = 0; s < numStrokes; s++) {
                 const cx = canvasSize / 2;
@@ -723,21 +817,12 @@
                     alpha: brushAlpha,
                     col: [red(brushCol), green(brushCol), blue(brushCol)]
                 };
-                const stroke = [cmd];
-                strokes.push(stroke);
+                strokes.push([cmd]);
                 applyCmd(pg, cmd);
+                applyCmd(pgT, cmd);
             }
 
             redraw();
-        }
-
-        function saveArt() {
-            // Export just the pg layer — no guide lines
-            const exportCanvas = pg.elt;
-            const link = document.createElement('a');
-            link.download = 'kaleido.png';
-            link.href = exportCanvas.toDataURL();
-            link.click();
         }
 
         function sparkleBtn(e) {
@@ -761,7 +846,6 @@
             const cw = document.querySelector('.canvas-container').clientWidth;
             const newSize = Math.floor(Math.min(cw - 150, 720) / 2) * 2;
             if (newSize !== canvasSize) {
-                const scale = newSize / canvasSize;
                 canvasSize = newSize;
                 resizeCanvas(canvasSize, canvasSize);
 
@@ -769,6 +853,10 @@
                 newPg.background(255);
                 newPg.image(pg, 0, 0, canvasSize, canvasSize);
                 pg = newPg;
+
+                const newPgT = createGraphics(canvasSize, canvasSize);
+                newPgT.image(pgT, 0, 0, canvasSize, canvasSize);
+                pgT = newPgT;
 
                 redraw();
             }
